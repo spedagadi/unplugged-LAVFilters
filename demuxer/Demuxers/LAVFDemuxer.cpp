@@ -18,6 +18,10 @@
  */
 
 #include "stdafx.h"
+
+// Build stamp — printed on every decklink branch trace so the log reveals
+// EXACTLY which LAVSplitter.ax binary produced it (staleness cross-check).
+#define DECKLINK_BUILD_TAG "LAV-decklink-20260909-1"
 #include "LAVFDemuxer.h"
 #include "LAVFUtils.h"
 #include "LAVFStreamInfo.h"
@@ -47,7 +51,10 @@ extern "C"
 #include "libavformat/demux.h"
 #include "libavutil/dovi_meta.h"
 #include "libavcodec/bsf.h"
+#include <libavdevice/avdevice.h>
 }
+
+#include <mutex>
 
 #ifdef DEBUG
 #include "lavf_log.h"
@@ -263,6 +270,54 @@ STDMETHODIMP CLAVFDemuxer::OpenInputStream(AVIOContext *byteContext, LPCOLESTR p
         memcpy(fileName, "http", 4);
     }
 
+    // DeckLink HDMI capture (video-only): a decklink://<device>?k=v&… URL
+    // selects the FFmpeg libavdevice "decklink" indev, passing the query
+    // params (video_input=hdmi, raw_format, signal_loss_action, no_audio…)
+    // straight to its AVOptions. The avdevice DLL is loaded/linked, so we
+    // must register it before av_find_input_format("decklink") can see it.
+    bool isDeckLink = false;
+    AVDictionary *decklinkOptions = nullptr;
+    if (_strnicmp("decklink://", fileName, 11) == 0)
+    {
+        isDeckLink = true;
+        fprintf(stderr, "[decklink] %s: URL='%s' detected\n", DECKLINK_BUILD_TAG, fileName);
+        char *device = fileName + 11;
+        char *query  = strchr(device, '?');
+        if (query) {
+            *query = '\0';
+            char *save = nullptr;
+            for (char *tok = strtok_s(query + 1, "&", &save); tok; tok = strtok_s(nullptr, "&", &save)) {
+                char *eq = strchr(tok, '=');
+                if (eq) {
+                    *eq = '\0';
+                    av_dict_set(&decklinkOptions, tok, eq + 1, 0);
+                }
+            }
+        }
+        // strip any "@port" suffix (quad ports enumerate as "(N)" devices already)
+        char *at = strrchr(device, '@');
+        if (at && at != device && at[1] >= '0' && at[1] <= '9') {
+            *at = '\0';
+        }
+        // percent-decode the device name in-place
+        {
+            char *src = device, *dst = device;
+            while (*src) {
+                if (*src == '%' && src[1] && src[2]) {
+                    int hi = src[1], lo = src[2];
+                    auto hex = [](char c) -> int { return (c >= '0' && c <= '9') ? c - '0' : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : (c >= 'a' && c <= 'f') ? c - 'a' + 10 : -1; };
+                    int h = hex(hi), l = hex(lo);
+                    if (h >= 0 && l >= 0) { *dst++ = (char)((h << 4) | l); src += 3; continue; }
+                }
+                *dst++ = *src++;
+            }
+            *dst = '\0';
+        }
+        // fileName is now the bare device name for ff_decklink_init_device
+        static std::once_flag avdevice_registered;
+        std::call_once(avdevice_registered, [] { avdevice_register_all(); });
+    }
+
     char *rtmp_prameters = nullptr;
     const char *rtsp_transport = nullptr;
     // check for rtsp transport protocol options
@@ -314,7 +369,22 @@ trynoformat:
     LPWSTR extension = pszFileName ? PathFindExtensionW(pszFileName) : nullptr;
 
     const AVInputFormat *inputFormat = nullptr;
-    if (format)
+    if (isDeckLink)
+    {
+        // live capture device — never probe a stream, force the decklink indev
+        inputFormat = av_find_input_format("decklink");
+        fprintf(stderr, "[decklink] %s: av_find_input_format=%s\n", DECKLINK_BUILD_TAG,
+                inputFormat ? "OK" : "NULL");
+        if (!inputFormat) {
+            // Distinct HRESULT so a caller (shell/spike) can tell this branch
+            // from "device failed to open": 0x80040154 = REGDB_E_CLASSNOTREG.
+            DbgLog((LOG_ERROR, 0, L"::OpenInputStream(): decklink indev not available (avdevice_register_all failed?)"));
+            av_dict_free(&decklinkOptions);
+            hr = REGDB_E_CLASSNOTREG;
+            goto done;
+        }
+    }
+    else if (format)
     {
         inputFormat = av_find_input_format(format);
     }
@@ -460,11 +530,30 @@ trynoformat:
     }
 
     m_timeOpening = time(nullptr);
+    if (decklinkOptions)
+    {
+        // decklink:// query params take precedence over the generic dict
+        av_dict_copy(&options, decklinkOptions, 0);
+        av_dict_free(&decklinkOptions);
+    }
     ret = avformat_open_input(&m_avFormat, fileName, inputFormat, &options);
     av_dict_free(&options);
     if (ret < 0)
     {
         DbgLog((LOG_ERROR, 0, TEXT("::OpenInputStream(): avformat_open_input failed (%d)"), ret));
+        if (isDeckLink)   // never retry-probe a live capture device
+        {
+            fprintf(stderr, "[decklink] %s: avformat_open_input failed ret=%d\n", DECKLINK_BUILD_TAG, ret);
+            // Distinct HRESULT carrying the AVERROR errno in the low word so a
+            // caller can see WHY the device open failed:
+            //   0x8004_01xx -> xx = errno (6 = ENXIO device not found, 5 = EIO, ...)
+            char errbuf[64] = {};
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            fprintf(stderr, "[decklink] %s: av_strerror='%s'\n", DECKLINK_BUILD_TAG, errbuf);
+            DbgLog((LOG_ERROR, 0, TEXT("::OpenInputStream(): decklink open failed: %S"), errbuf));
+            hr = MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x100 + ((-ret) & 0x7FFF));
+            goto done;
+        }
         if (format)
         {
             DbgLog((LOG_ERROR, 0, TEXT(" -> trying again without specific format")));
@@ -486,7 +575,10 @@ trynoformat:
 done:
     CleanupAVFormat();
     SAFE_CO_FREE(fileName);
-    return E_FAIL;
+    // Honor the failure HRESULT set by a specific branch (e.g. the decklink
+    // open-failure code carrying the AVERROR errno); fall back to E_FAIL for
+    // the generic paths that never set hr to a failure.
+    return FAILED(hr) ? hr : E_FAIL;
 }
 
 void CLAVFDemuxer::AddMPEGTSStream(int pid, uint32_t stream_type)
