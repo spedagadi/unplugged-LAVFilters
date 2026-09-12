@@ -96,7 +96,10 @@ configure() (
   EXTRA_LDFLAGS=""
   PKG_CONFIG_PREFIX_DIR=""
   if [ "${arch}" == "x86_64" ]; then
-    export PKG_CONFIG_PATH="$PKG_CONFIG_PATH:../thirdparty/64/lib/pkgconfig/"
+    # Absolute PKG_CONFIG_PATH: pkgconf (MSYS2, Windows) fails to resolve the
+    # relative ../thirdparty path when it is a later entry. Configure runs with
+    # CWD=ffmpeg so $PWD is correct here.
+    export PKG_CONFIG_PATH="$PKG_CONFIG_PATH:$PWD/../thirdparty/64/lib/pkgconfig/"
     OPTIONS="${OPTIONS} --enable-cross-compile --cross-prefix=${cross_prefix} --target-os=mingw32 --pkg-config=pkg-config"
     EXTRA_CFLAGS="${EXTRA_CFLAGS} -I../thirdparty/64/include -Idecklink -fno-omit-frame-pointer"
     EXTRA_CXXFLAGS="${EXTRA_CXXFLAGS} -I../thirdparty/64/include -Idecklink -fno-omit-frame-pointer"

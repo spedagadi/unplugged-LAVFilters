@@ -616,6 +616,7 @@ STDMETHODIMP CLAVSplitter::LoadURL(LPCOLESTR pszURL, LPCOLESTR pszUserAgent, LPC
         return hr;
     }
     m_pDemuxer->AddRef();
+    fprintf(stderr, "[decklink] TRACE: LoadURL -> InitDemuxer()\n"); // TEMP-DEBUG
 
     return InitDemuxer();
 }
@@ -647,9 +648,11 @@ STDMETHODIMP CLAVSplitter::InitDemuxer()
 
     m_rtStart = m_rtNewStart = m_rtCurrent = 0;
     m_rtStop = m_rtNewStop = m_pDemuxer->GetDuration();
+    fprintf(stderr, "[decklink] TRACE: InitDemuxer got duration, selecting video stream\n"); // TEMP-DEBUG
     m_bPlaybackStarted = FALSE;
 
     const CBaseDemuxer::stream *videoStream = m_pDemuxer->SelectVideoStream();
+    fprintf(stderr, "[decklink] TRACE: videoStream=%p\n", (void*)videoStream); // TEMP-DEBUG
     if (videoStream)
     {
         CLAVOutputPin *pPin = new CLAVOutputPin(videoStream->streamInfo->mtypes,

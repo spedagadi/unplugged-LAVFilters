@@ -31,6 +31,7 @@
 #include "IMediaSideDataFFmpeg.h"
 
 #include "LAVSplitterSettingsInternal.h"
+#include "lavf_log.h"              // TEMP-DEBUG: lavf_log_callback (stderr mirror)
 
 #include "moreuuids.h"
 #include "H264Nalu.h"
@@ -277,6 +278,7 @@ STDMETHODIMP CLAVFDemuxer::OpenInputStream(AVIOContext *byteContext, LPCOLESTR p
     // must register it before av_find_input_format("decklink") can see it.
     bool isDeckLink = false;
     AVDictionary *decklinkOptions = nullptr;
+    char *decklinkDevice = nullptr; // bare device name (past the decklink:// prefix)
     if (_strnicmp("decklink://", fileName, 11) == 0)
     {
         isDeckLink = true;
@@ -314,8 +316,12 @@ STDMETHODIMP CLAVFDemuxer::OpenInputStream(AVIOContext *byteContext, LPCOLESTR p
             *dst = '\0';
         }
         // fileName is now the bare device name for ff_decklink_init_device
+        decklinkDevice = device;
         static std::once_flag avdevice_registered;
         std::call_once(avdevice_registered, [] { avdevice_register_all(); });
+        av_log_set_callback(lavf_log_callback); // TEMP-DEBUG: force av_log to stderr
+        av_log_set_level(AV_LOG_DEBUG);       // TEMP-DEBUG
+        fprintf(stderr, "[decklink] %s: LAV passes device='%s' (len=%zu)\n", DECKLINK_BUILD_TAG, fileName, strlen(fileName)); // TEMP-DEBUG
     }
 
     char *rtmp_prameters = nullptr;
@@ -536,7 +542,7 @@ trynoformat:
         av_dict_copy(&options, decklinkOptions, 0);
         av_dict_free(&decklinkOptions);
     }
-    ret = avformat_open_input(&m_avFormat, fileName, inputFormat, &options);
+    ret = avformat_open_input(&m_avFormat, isDeckLink ? decklinkDevice : fileName, inputFormat, &options);
     av_dict_free(&options);
     if (ret < 0)
     {
@@ -765,10 +771,13 @@ static struct sCoverMimeTypes
 
 STDMETHODIMP CLAVFDemuxer::InitAVFormat(LPCOLESTR pszFileName, BOOL bForce)
 {
+    fprintf(stderr, "[decklink] TRACE-AV: InitAVFormat entry (iformat=%s nb_streams=%d\n", m_avFormat->iformat ? m_avFormat->iformat->name : "null", (int)m_avFormat->nb_streams); // TEMP-DEBUG
     HRESULT hr = S_OK;
 
     const char *format = nullptr;
+    fprintf(stderr, "[decklink] TRACE-AV: before lavf_get_iformat_infos\n"); // TEMP-DEBUG
     lavf_get_iformat_infos(m_avFormat->iformat, &format, nullptr);
+    fprintf(stderr, "[decklink] TRACE-AV: after lavf_get_iformat_infos format='%s'\n", format ? format : "(null)"); // TEMP-DEBUG
     if (!bForce && (!format || !m_pSettings->IsFormatEnabled(format)))
     {
         DbgLog((LOG_TRACE, 20, L"::InitAVFormat() - format of type '%S' disabled, failing",
@@ -793,11 +802,14 @@ STDMETHODIMP CLAVFDemuxer::InitAVFormat(LPCOLESTR pszFileName, BOOL bForce)
 
     m_bTSDiscont = (m_avFormat->iformat->flags & AVFMT_TS_DISCONT) || m_bRM || (_stricmp(m_pszInputFormat, "dash") == 0);
 
+    fprintf(stderr, "[decklink] TRACE-AV: format enabled, m_pszInputFormat='%s'\n", format ? format : "??"); // TEMP-DEBUG
     WCHAR szProt[24] = L"file";
     if (pszFileName)
     {
+        fprintf(stderr, "[decklink] TRACE-AV: pszFileName='%S' -> UrlGetPart\n", pszFileName); // TEMP-DEBUG
         DWORD dwNumChars = 24;
         hr = UrlGetPart(pszFileName, szProt, &dwNumChars, URL_PART_SCHEME, 0);
+        fprintf(stderr, "[decklink] TRACE-AV: UrlGetPart hr=0x%08X prot='%S'\n", (unsigned)hr, szProt); // TEMP-DEBUG
         if (SUCCEEDED(hr) && dwNumChars && (_wcsicmp(szProt, L"file") != 0))
         {
             m_avFormat->flags |= AVFMT_FLAG_NETWORK;
@@ -827,8 +839,10 @@ STDMETHODIMP CLAVFDemuxer::InitAVFormat(LPCOLESTR pszFileName, BOOL bForce)
 
     av_opt_set_int(m_avFormat, "correct_ts_overflow", !m_pBluRay, 0);
 
+    fprintf(stderr, "[decklink] TRACE-AV: calling avformat_find_stream_info (will read live frames)\n"); // TEMP-DEBUG
     m_timeOpening = time(nullptr);
     int ret = avformat_find_stream_info(m_avFormat, nullptr);
+    fprintf(stderr, "[decklink] TRACE-AV: avformat_find_stream_info ret=%d\n", ret); // TEMP-DEBUG
     if (ret < 0)
     {
         DbgLog((LOG_ERROR, 0, TEXT("::InitAVFormat(): av_find_stream_info failed (%d)"), ret));

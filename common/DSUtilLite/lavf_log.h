@@ -47,6 +47,8 @@ inline void lavf_log_callback(void *ptr, int level, const char *fmt, va_list vl)
         line[len - 1] = 0;
     }
 
+    fprintf(stderr, "[lavf] %s\n", line); // TEMP-DEBUG: mirror av_log to stderr
+
     DbgLog((LOG_CUSTOM1, level, L"%S", line));
     strncpy_s(prev, line, _TRUNCATE);
 }

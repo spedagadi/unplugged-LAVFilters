@@ -95,12 +95,12 @@ int wmain(int argc, wchar_t* argv[])
     }
     std::wstring device = argv[1];
     std::wstring url = L"decklink://" + device +
-        L"?video_input=hdmi&signal_loss_action=repeat&no_audio=1&raw_format=uyvy422";
+        L"?video_input=hdmi&signal_loss_action=repeat&no_audio=1&raw_format=uyvy422&loglevel=debug";
     printf("[spike] url='%S'\n", url.c_str());
 
     // Load the splitter DLL by EXPLICIT path + DllGetClassObject so we know
     // exactly which file is running (no COM-cache / stale-registration doubt).
-    const wchar_t* axPath = L"C:\\Code\\LAVFilters\\bin_x64\\LAVSplitter.ax";
+    const wchar_t* axPath = L"C:\\code\\LAVFilters\\bin_x64\\LAVSplitter.ax";
     if (argc >= 3) axPath = argv[2];
     {
         wchar_t axdir[MAX_PATH] = {};
