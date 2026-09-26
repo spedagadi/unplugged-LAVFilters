@@ -60,7 +60,19 @@ static DXVA2_ExtendedFormat GetDXVA2ExtendedFlags(AVFrame *frame)
     DXVA2_ExtendedFormat fmt;
     ZeroMemory(&fmt, sizeof(fmt));
 
-    fillDXVAExtFormat(fmt, -1, frame->color_primaries, frame->colorspace, frame->color_trc, frame->chroma_location);
+    // NO Dolby-Vision special-casing here, on purpose (reverted 2026-09-26).
+    // A DV Profile 5 / IPTPQc2 frame has an empty HEVC VUI, so this reports
+    // UNSPECIFIED and the renderer sees a plain SDR-tagged source. That looks
+    // like a bug and tempts a decoder-side promotion to BT.2020/PQ — but the
+    // renderer ALREADY owns DV: MPCVR detects the source from the RPU side data
+    // we forward just below, and a PQ-tagged source DISABLES its DoVi setup path
+    // (`doviStateChanged && !SourceIsHDR10orHLG()` in DX11VideoProcessor) and the
+    // HDR10 gate skips the RPU unless the user opts in. Promoting here is what
+    // made a P5 file show wrong colours here while PotPlayer — which leaves the
+    // tags empty — rendered it correctly. Hand DV to the renderer untouched.
+
+    fillDXVAExtFormat(fmt, -1, frame->color_primaries, frame->colorspace,
+                      frame->color_trc, frame->chroma_location);
 
     if (frame->format == AV_PIX_FMT_XYZ12LE || frame->format == AV_PIX_FMT_XYZ12BE)
         fmt.VideoPrimaries = DXVA2_VideoPrimaries_BT709;
